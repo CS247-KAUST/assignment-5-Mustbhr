@@ -108,11 +108,38 @@ void keyCallback(GLFWwindow* window, int key, int scancode, int action, int mods
                 en_pathline = !en_pathline;
                 fprintf(stderr, "%s drawing pathlines.\n", en_pathline? "enabling" : "disabling");
                 break;
-            // TODO: add keyboard controls for:
-            //   - toggle colormap mode (cycle off/rainbow/cool-warm)
-            //   - adjust blend factor (increase/decrease between 0.0 and 1.0)
-            //   - toggle integration method (Euler/RK2)
-            //   - clear all seeds
+            case GLFW_KEY_C:
+                colormap_mode = (colormap_mode + 1) % 3;
+                fprintf(stderr, "colormap mode: %d\n", colormap_mode);
+                break;
+            case GLFW_KEY_LEFT_BRACKET:
+                blend_factor = std::max(0.0f, blend_factor - 0.1f);
+                fprintf(stderr, "blend factor: %.2f\n", blend_factor);
+                break;
+            case GLFW_KEY_RIGHT_BRACKET:
+                blend_factor = std::min(1.0f, blend_factor + 0.1f);
+                fprintf(stderr, "blend factor: %.2f\n", blend_factor);
+                break;
+            case GLFW_KEY_M:
+                integration_method = (integration_method + 1) % 3;
+                fprintf(stderr, "integration: %s\n",
+                    integration_method==0?"Euler":(integration_method==1?"RK2":"RK4"));
+                break;
+            case GLFW_KEY_X:
+                streamlines.clear();
+                pathlines.clear();
+                streamline_seeds.clear();
+                fprintf(stderr, "cleared all seeds.\n");
+                break;
+            case GLFW_KEY_L:
+                arrow_length_mode = 1 - arrow_length_mode;
+                fprintf(stderr, "arrow length mode: %s\n",
+                    arrow_length_mode==0?"constant":"by magnitude");
+                break;
+            case GLFW_KEY_R:
+                rake_mode = !rake_mode;
+                fprintf(stderr, "rake mode %s.\n", rake_mode?"on":"off");
+                break;
             case GLFW_KEY_Q:
             case GLFW_KEY_ESCAPE:
                 exit( 0 );
@@ -146,9 +173,29 @@ void mouseButtonCallback(GLFWwindow* window, int button, int action, int mods)
         double xpos, ypos;
         //getting cursor position
         glfwGetCursorPos(window, &xpos, &ypos);
-        // TODO: seed streamlines & pathlines using mouse clicks
-        // Hint: convert screen coords to grid coords (y-flip needed),
-        //       then call computeStreamline/computePathline when enabled
+
+        if (view_width <= 0 || view_height <= 0) return;
+        if (!grid_data_loaded) return;
+
+        // convert screen to grid coords (flip y because screen y goes down)
+        float gx = (float)xpos * (float)vol_dim[0] / (float)view_width;
+        float gy = (float)(view_height - ypos) * (float)vol_dim[1] / (float)view_height;
+
+        if (en_streamline) {
+            if (rake_mode) {
+                // horizontal rake: 7 seeds along x at clicked y
+                int N = 7;
+                for (int i = 0; i < N; i++) {
+                    float fx = (i + 1) * (vol_dim[0] / (float)(N + 1));
+                    computeStreamline((int)fx, (int)gy);
+                }
+            } else {
+                computeStreamline((int)gx, (int)gy);
+            }
+        }
+        if (en_pathline) {
+            computePathline((int)gx, (int)gy, loaded_timestep);
+        }
     }
 }
 
@@ -164,6 +211,14 @@ void loadNextTimestep( void )
 {
     loaded_timestep = ( loaded_timestep + 1 ) % num_timesteps;
     DownloadScalarFieldAsTexture();
+
+    // recompute all streamlines for the new timeslice using the saved seeds
+    std::vector< std::pair<float,float> > seeds = streamline_seeds;
+    streamlines.clear();
+    streamline_seeds.clear();
+    for (size_t i = 0; i < seeds.size(); i++) {
+        computeStreamline((int)seeds[i].first, (int)seeds[i].second);
+    }
 }
 
 
@@ -388,12 +443,12 @@ void DownloadScalarFieldAsTexture( void )
     // set necessary texture parameters
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MIN_FILTER, GL_LINEAR );
     glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_MAG_FILTER, GL_LINEAR );
-    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP );
-    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_S, GL_CLAMP_TO_EDGE );
+    glTexParameteri( GL_TEXTURE_2D, GL_TEXTURE_WRAP_T, GL_CLAMP_TO_EDGE );
 
     int datasize = vol_dim[0] * vol_dim[1];
-    //download texture in correct format
-    glTexImage2D( GL_TEXTURE_2D, 0,  GL_INTENSITY16, vol_dim[ 0 ], vol_dim[ 1 ], 0, GL_LUMINANCE, GL_FLOAT, &scalar_fields[ (loaded_timestep + current_scalar_field * num_timesteps)*datasize ] );
+    //download texture (core profile: use GL_R16 / GL_RED instead of GL_INTENSITY16 / GL_LUMINANCE)
+    glTexImage2D( GL_TEXTURE_2D, 0,  GL_R16, vol_dim[ 0 ], vol_dim[ 1 ], 0, GL_RED, GL_FLOAT, &scalar_fields[ (loaded_timestep + current_scalar_field * num_timesteps)*datasize ] );
 
 
     glDisable( GL_TEXTURE_2D );
@@ -464,15 +519,28 @@ void setup() {
 
 
     // compile & link shader
+#ifdef __APPLE__
+    vectorProgram.compileShader("../shaders/vertex.vs");
+    vectorProgram.compileShader("../shaders/fragment.fs");
+#else
     vectorProgram.compileShader("../../../shaders/vertex.vs");
     vectorProgram.compileShader("../../../shaders/fragment.fs");
+#endif
     vectorProgram.link();
 
     // make quad to render texture
     // see: vboquad.h and vboquad.cpp
     quad.init();
 
-    // TODO: glyph/streamlines/pathlines VAO and VBO
+    // set up VAO/VBO for line drawing (glyphs/streamlines/pathlines)
+    glGenVertexArrays(1, &lineVAO);
+    glGenBuffers(1, &lineVBO);
+    glBindVertexArray(lineVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+    glVertexAttribPointer(0, 2, GL_FLOAT, GL_FALSE, 0, 0);
+    glEnableVertexAttribArray(0);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
 }
 
 // rendering
@@ -489,18 +557,45 @@ void render() {
 
     vectorProgram.setUniform("vertexColor", glm::vec4(0));
     vectorProgram.setUniform("model", model);
-
-    // TODO: pass colormap uniforms to shader before drawing the quad
-    // Hint: set colormapMode and blendFactor uniforms here
+    vectorProgram.setUniform("colormapMode", colormap_mode);
+    vectorProgram.setUniform("blendFactor", blend_factor);
 
     quad.render();
     glDisable( GL_TEXTURE_2D );
 
-    // TODO: reset colormap mode to 0 before drawing overlays
-    // so that glyphs/streamlines/pathlines use solid colors
+    // switch to solid color mode for overlays
+    vectorProgram.setUniform("colormapMode", 3);
 
-    // TODO: draw glyphs, streamlines, pathlines
+    if (en_arrow) {
+        vectorProgram.setUniform("vertexColor", glm::vec4(1, 1, 1, 1));
+        drawGlyphs();
+    }
 
+    if (en_streamline) {
+        vectorProgram.setUniform("vertexColor", glm::vec4(1, 1, 0, 1)); // yellow
+        glBindVertexArray(lineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+        for (size_t i = 0; i < streamlines.size(); i++) {
+            glBufferData(GL_ARRAY_BUFFER, streamlines[i].size()*sizeof(float),
+                         streamlines[i].data(), GL_DYNAMIC_DRAW);
+            glDrawArrays(GL_LINE_STRIP, 0, streamlines[i].size()/2);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+    }
+
+    if (en_pathline) {
+        vectorProgram.setUniform("vertexColor", glm::vec4(0, 1, 1, 1)); // cyan
+        glBindVertexArray(lineVAO);
+        glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+        for (size_t i = 0; i < pathlines.size(); i++) {
+            glBufferData(GL_ARRAY_BUFFER, pathlines[i].size()*sizeof(float),
+                         pathlines[i].data(), GL_DYNAMIC_DRAW);
+            glDrawArrays(GL_LINE_STRIP, 0, pathlines[i].size()/2);
+        }
+        glBindBuffer(GL_ARRAY_BUFFER, 0);
+        glBindVertexArray(0);
+    }
 }
 
 // entry point
@@ -517,6 +612,11 @@ int main(int argc, char** argv)
     en_pathline = false;
     sampling_rate = 15;
     dt = 0.1;
+    integration_method = 0;
+    colormap_mode = 0;
+    blend_factor = 0.5f;
+    arrow_length_mode = 0;
+    rake_mode = false;
 
     reset_rendering_props();
 
@@ -529,9 +629,15 @@ int main(int argc, char** argv)
     clearColor = 0;
 
 
+#ifdef __APPLE__
+    filenames[ 0 ] = "../data/block/c_block";
+    filenames[ 1 ] = "../data/tube/tube";
+    filenames[ 2 ] = "../data/hurricane/hurricane_p_tc";
+#else
     filenames[ 0 ] = "../../../data/block/c_block";
     filenames[ 1 ] = "../../../data/tube/tube";
     filenames[ 2 ] = "../../../data/hurricane/hurricane_p_tc";
+#endif
 
 
 
@@ -542,6 +648,12 @@ int main(int argc, char** argv)
     if (!glfwInit()) {
         exit(EXIT_FAILURE);
     }
+
+    // need core profile (macOS requires this for OpenGL > 2.1)
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MAJOR, 4);
+    glfwWindowHint(GLFW_CONTEXT_VERSION_MINOR, 1);
+    glfwWindowHint(GLFW_OPENGL_PROFILE, GLFW_OPENGL_CORE_PROFILE);
+    glfwWindowHint(GLFW_OPENGL_FORWARD_COMPAT, GL_TRUE);
 
     // init glfw window
     window = glfwCreateWindow(gWindowWidth, gWindowHeight, "AMCS/CS247 Scientific Visualization", nullptr, nullptr);
@@ -600,30 +712,323 @@ int main(int argc, char** argv)
     return EXIT_SUCCESS;
 }
 
-// TODO: define any useful functions you might need.
-//  e.g., indexing, linear interpolation ..etc
+// helpers
+
+// bilinear interpolation of the vector at fractional grid position (x,y) for timestep t
+// returns (vx, vy); returns 0 if out of bounds
+static void sampleVec(float x, float y, int t, float &vx, float &vy)
+{
+    vx = 0; vy = 0;
+    if (x < 0 || y < 0) return;
+    if (x >= vol_dim[0]-1 || y >= vol_dim[1]-1) return;
+
+    int x0 = (int)x;
+    int y0 = (int)y;
+    float fx = x - x0;
+    float fy = y - y0;
+
+    int W = vol_dim[0];
+    int offset = 3 * t * data_size;
+
+    // 4 surrounding samples
+    float vx00 = vector_array[offset + 3*(x0   + y0*W)     ];
+    float vy00 = vector_array[offset + 3*(x0   + y0*W)   +1];
+    float vx10 = vector_array[offset + 3*(x0+1 + y0*W)     ];
+    float vy10 = vector_array[offset + 3*(x0+1 + y0*W)   +1];
+    float vx01 = vector_array[offset + 3*(x0   + (y0+1)*W) ];
+    float vy01 = vector_array[offset + 3*(x0   + (y0+1)*W)+1];
+    float vx11 = vector_array[offset + 3*(x0+1 + (y0+1)*W) ];
+    float vy11 = vector_array[offset + 3*(x0+1 + (y0+1)*W)+1];
+
+    float a = (1-fx)*(1-fy);
+    float b =    fx *(1-fy);
+    float c = (1-fx)*   fy ;
+    float d =    fx *   fy ;
+    vx = a*vx00 + b*vx10 + c*vx01 + d*vx11;
+    vy = a*vy00 + b*vy10 + c*vy01 + d*vy11;
+}
+
+// trilinear: bilinear in space + linear in time
+static void sampleVecTime(float x, float y, float tf, float &vx, float &vy)
+{
+    vx = 0; vy = 0;
+    if (tf < 0 || tf > num_timesteps - 1) return;
+    int t0 = (int)tf;
+    int t1 = t0 + 1;
+    if (t1 >= num_timesteps) t1 = t0;
+    float ft = tf - t0;
+
+    float vx0, vy0, vx1, vy1;
+    sampleVec(x, y, t0, vx0, vy0);
+    sampleVec(x, y, t1, vx1, vy1);
+    vx = (1-ft)*vx0 + ft*vx1;
+    vy = (1-ft)*vy0 + ft*vy1;
+}
+
+// convert grid coords to NDC for drawing
+static inline float toNDC_x(float gx) { return 2.0f * gx / (float)vol_dim[0] - 1.0f; }
+static inline float toNDC_y(float gy) { return 2.0f * gy / (float)vol_dim[1] - 1.0f; }
+
+// single integration step for streamlines (constant time slice)
+static void stepStream(float &x, float &y, float h)
+{
+    int t = loaded_timestep;
+    if (integration_method == 0) {
+        // Euler
+        float vx, vy;
+        sampleVec(x, y, t, vx, vy);
+        x += h * vx;
+        y += h * vy;
+    } else if (integration_method == 1) {
+        // RK2 (midpoint)
+        float k1x, k1y;
+        sampleVec(x, y, t, k1x, k1y);
+        float mx = x + 0.5f*h*k1x;
+        float my = y + 0.5f*h*k1y;
+        float k2x, k2y;
+        sampleVec(mx, my, t, k2x, k2y);
+        x += h*k2x;
+        y += h*k2y;
+    } else {
+        // RK4
+        float k1x,k1y,k2x,k2y,k3x,k3y,k4x,k4y;
+        sampleVec(x, y, t, k1x, k1y);
+        sampleVec(x+0.5f*h*k1x, y+0.5f*h*k1y, t, k2x, k2y);
+        sampleVec(x+0.5f*h*k2x, y+0.5f*h*k2y, t, k3x, k3y);
+        sampleVec(x+    h*k3x, y+    h*k3y, t, k4x, k4y);
+        x += h*(k1x + 2*k2x + 2*k3x + k4x)/6.0f;
+        y += h*(k1y + 2*k2y + 2*k3y + k4y)/6.0f;
+    }
+}
+
+// single integration step for pathlines (also advances in time)
+static void stepPath(float &x, float &y, float &tf, float h)
+{
+    if (integration_method == 0) {
+        float vx, vy;
+        sampleVecTime(x, y, tf, vx, vy);
+        x += h * vx;
+        y += h * vy;
+        tf += h;
+    } else if (integration_method == 1) {
+        float k1x, k1y;
+        sampleVecTime(x, y, tf, k1x, k1y);
+        float mx = x + 0.5f*h*k1x;
+        float my = y + 0.5f*h*k1y;
+        float mt = tf + 0.5f*h;
+        float k2x, k2y;
+        sampleVecTime(mx, my, mt, k2x, k2y);
+        x += h*k2x;
+        y += h*k2y;
+        tf += h;
+    } else {
+        float k1x,k1y,k2x,k2y,k3x,k3y,k4x,k4y;
+        sampleVecTime(x, y, tf,            k1x, k1y);
+        sampleVecTime(x+0.5f*h*k1x, y+0.5f*h*k1y, tf+0.5f*h, k2x, k2y);
+        sampleVecTime(x+0.5f*h*k2x, y+0.5f*h*k2y, tf+0.5f*h, k3x, k3y);
+        sampleVecTime(x+    h*k3x, y+    h*k3y, tf+    h,    k4x, k4y);
+        x += h*(k1x + 2*k2x + 2*k3x + k4x)/6.0f;
+        y += h*(k1y + 2*k2y + 2*k3y + k4y)/6.0f;
+        tf += h;
+    }
+}
 
 
 void computeStreamline(int x, int y)
 {
-    // TODO: compute streamlines starting from x,y position. enable switching between euler and runge kutta
-    // Hint: implement bilinear interpolation of vectors, forward+backward integration,
-    //       and stopping conditions (boundary, zero vector, max accumulated length)
+    if (!grid_data_loaded) return;
 
-    // TODO: set any useful uniforms & update VBO & draw
+    // save the seed so we can recompute if timestep changes
+    streamline_seeds.push_back(std::make_pair((float)x, (float)y));
+
+    // max length & step count
+    float maxLen = 5.0f * (float)std::max(vol_dim[0], vol_dim[1]);
+    int   maxSteps = 5000;
+    float minSpeed = 1e-5f;
+
+    // backward integration (negative dt), collect, reverse
+    std::vector<float> back;
+    {
+        float px = x, py = y;
+        float len = 0.0f;
+        for (int s = 0; s < maxSteps; s++) {
+            float vx, vy;
+            sampleVec(px, py, loaded_timestep, vx, vy);
+            float sp = sqrtf(vx*vx + vy*vy);
+            if (sp < minSpeed) break;
+            float ox = px, oy = py;
+            stepStream(px, py, -dt);
+            if (px < 0 || py < 0 || px >= vol_dim[0]-1 || py >= vol_dim[1]-1) break;
+            len += sqrtf((px-ox)*(px-ox) + (py-oy)*(py-oy));
+            if (len > maxLen) break;
+            back.push_back(toNDC_x(px));
+            back.push_back(toNDC_y(py));
+        }
+    }
+
+    // assemble: reversed backward + seed + forward
+    std::vector<float> line;
+    for (int i = (int)back.size()/2 - 1; i >= 0; i--) {
+        line.push_back(back[2*i]);
+        line.push_back(back[2*i+1]);
+    }
+    line.push_back(toNDC_x((float)x));
+    line.push_back(toNDC_y((float)y));
+
+    // forward
+    {
+        float px = x, py = y;
+        float len = 0.0f;
+        for (int s = 0; s < maxSteps; s++) {
+            float vx, vy;
+            sampleVec(px, py, loaded_timestep, vx, vy);
+            float sp = sqrtf(vx*vx + vy*vy);
+            if (sp < minSpeed) break;
+            float ox = px, oy = py;
+            stepStream(px, py, dt);
+            if (px < 0 || py < 0 || px >= vol_dim[0]-1 || py >= vol_dim[1]-1) break;
+            len += sqrtf((px-ox)*(px-ox) + (py-oy)*(py-oy));
+            if (len > maxLen) break;
+            line.push_back(toNDC_x(px));
+            line.push_back(toNDC_y(py));
+        }
+    }
+
+    streamlines.push_back(line);
 }
 
 void computePathline(int x, int y, int t)
 {
-    // TODO: compute pathlines starting from x,y position and time step t. enable switching between euler and runge kutta
-    // Hint: implement trilinear interpolation (bilinear in space + linear in time),
-    //       forward+backward integration advancing in both space and time
+    if (!grid_data_loaded) return;
 
-    // TODO: set any useful uniforms & update VBO & draw
+    float maxLen = 5.0f * (float)std::max(vol_dim[0], vol_dim[1]);
+    int   maxSteps = 5000;
+    float minSpeed = 1e-5f;
+
+    // backward
+    std::vector<float> back;
+    {
+        float px = x, py = y;
+        float tf = (float)t;
+        float len = 0.0f;
+        for (int s = 0; s < maxSteps; s++) {
+            float vx, vy;
+            sampleVecTime(px, py, tf, vx, vy);
+            float sp = sqrtf(vx*vx + vy*vy);
+            if (sp < minSpeed) break;
+            float ox = px, oy = py;
+            stepPath(px, py, tf, -dt);
+            if (px < 0 || py < 0 || px >= vol_dim[0]-1 || py >= vol_dim[1]-1) break;
+            if (tf < 0 || tf > num_timesteps - 1) break;
+            len += sqrtf((px-ox)*(px-ox) + (py-oy)*(py-oy));
+            if (len > maxLen) break;
+            back.push_back(toNDC_x(px));
+            back.push_back(toNDC_y(py));
+        }
+    }
+
+    std::vector<float> line;
+    for (int i = (int)back.size()/2 - 1; i >= 0; i--) {
+        line.push_back(back[2*i]);
+        line.push_back(back[2*i+1]);
+    }
+    line.push_back(toNDC_x((float)x));
+    line.push_back(toNDC_y((float)y));
+
+    // forward
+    {
+        float px = x, py = y;
+        float tf = (float)t;
+        float len = 0.0f;
+        for (int s = 0; s < maxSteps; s++) {
+            float vx, vy;
+            sampleVecTime(px, py, tf, vx, vy);
+            float sp = sqrtf(vx*vx + vy*vy);
+            if (sp < minSpeed) break;
+            float ox = px, oy = py;
+            stepPath(px, py, tf, dt);
+            if (px < 0 || py < 0 || px >= vol_dim[0]-1 || py >= vol_dim[1]-1) break;
+            if (tf < 0 || tf > num_timesteps - 1) break;
+            len += sqrtf((px-ox)*(px-ox) + (py-oy)*(py-oy));
+            if (len > maxLen) break;
+            line.push_back(toNDC_x(px));
+            line.push_back(toNDC_y(py));
+        }
+    }
+
+    pathlines.push_back(line);
 }
 
 void drawGlyphs() {
-    // TODO: draw arrows/glyphs
-    // Hint: iterate over grid with sampling_rate stride, compute arrow geometry
-    //       (shaft + arrowhead) in NDC, upload to VBO, draw with GL_LINES
+    if (!grid_data_loaded) return;
+
+    std::vector<float> verts; // pairs of x,y for GL_LINES
+
+    // compute max magnitude for normalization (rough)
+    float maxMag = 0.0f;
+    for (int j = 0; j < vol_dim[1]; j += sampling_rate) {
+        for (int i = 0; i < vol_dim[0]; i += sampling_rate) {
+            float vx, vy;
+            sampleVec((float)i, (float)j, loaded_timestep, vx, vy);
+            float m = sqrtf(vx*vx + vy*vy);
+            if (m > maxMag) maxMag = m;
+        }
+    }
+    if (maxMag < 1e-8f) maxMag = 1.0f;
+
+    // arrow length in NDC ~ a bit smaller than the grid cell
+    float arrowLen = (float)sampling_rate * 2.0f / (float)std::max(vol_dim[0], vol_dim[1]);
+
+    for (int j = 0; j < vol_dim[1]; j += sampling_rate) {
+        for (int i = 0; i < vol_dim[0]; i += sampling_rate) {
+            float vx, vy;
+            sampleVec((float)i, (float)j, loaded_timestep, vx, vy);
+            float mag = sqrtf(vx*vx + vy*vy);
+            if (mag < 1e-8f) continue;
+
+            // direction
+            float dx = vx / mag;
+            float dy = vy / mag;
+
+            // length
+            float L;
+            if (arrow_length_mode == 0) L = arrowLen;
+            else                        L = arrowLen * (mag / maxMag);
+
+            // shaft
+            float sx = toNDC_x((float)i);
+            float sy = toNDC_y((float)j);
+            // tip in NDC: need to scale dx,dy by NDC ratios
+            float tx = sx + L * dx;
+            float ty = sy + L * dy;
+
+            verts.push_back(sx); verts.push_back(sy);
+            verts.push_back(tx); verts.push_back(ty);
+
+            // arrowhead: two short lines from tip
+            float headLen = L * 0.35f;
+            // rotate dir by +/- 150 deg from forward
+            // simpler: arrowhead = tip - headLen*(dir rotated +/-25deg)
+            float ca = cosf(2.6f); // ~150 deg
+            float sa = sinf(2.6f);
+            float h1x = tx + headLen * ( ca*(-dx) - sa*(-dy));
+            float h1y = ty + headLen * ( sa*(-dx) + ca*(-dy));
+            float h2x = tx + headLen * ( ca*(-dx) + sa*(-dy));
+            float h2y = ty + headLen * (-sa*(-dx) + ca*(-dy));
+
+            verts.push_back(tx); verts.push_back(ty);
+            verts.push_back(h1x); verts.push_back(h1y);
+            verts.push_back(tx); verts.push_back(ty);
+            verts.push_back(h2x); verts.push_back(h2y);
+        }
+    }
+
+    if (verts.empty()) return;
+
+    glBindVertexArray(lineVAO);
+    glBindBuffer(GL_ARRAY_BUFFER, lineVBO);
+    glBufferData(GL_ARRAY_BUFFER, verts.size()*sizeof(float), verts.data(), GL_DYNAMIC_DRAW);
+    glDrawArrays(GL_LINES, 0, verts.size()/2);
+    glBindBuffer(GL_ARRAY_BUFFER, 0);
+    glBindVertexArray(0);
 }

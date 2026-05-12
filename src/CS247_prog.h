@@ -37,6 +37,19 @@ bool en_pathline;
 int sampling_rate;
 float dt;
 
+// integration method: 0 = Euler, 1 = RK2, 2 = RK4
+int integration_method;
+
+// colormap stuff
+int colormap_mode;    // 0 off, 1 rainbow, 2 cool-warm
+float blend_factor;
+
+// arrow length mode: 0 constant, 1 scaled by magnitude
+int arrow_length_mode;
+
+// rake mode for streamline seeding
+bool rake_mode;
+
 
 
 
@@ -100,11 +113,16 @@ void initGL( void );
 
 void reset_rendering_props( void );
 
-// TODO: define data arrays, VAO and VBO
-// Hint: you need one for the glyphs, streamlines, pathlines
+// VAO/VBO used for drawing all lines (glyphs, streamlines, pathlines)
+GLuint lineVAO;
+GLuint lineVBO;
 
-// TODO: define colormap variables
-// Hint: you need a colormap mode (off/rainbow/cool-warm) and a blend factor
+// storage for seeded streamlines and pathlines
+// each entry is a polyline already converted to NDC vec2's
+std::vector< std::vector<float> > streamlines;     // pairs of (x,y) in NDC
+std::vector< std::vector<float> > pathlines;
+// keep seed grid-coords so we can recompute streamlines when timestep changes
+std::vector< std::pair<float,float> > streamline_seeds;
 
 // make quad to load texture to
 VBOQuad quad;
