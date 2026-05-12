@@ -1005,12 +1005,12 @@ void drawGlyphs() {
             verts.push_back(sx); verts.push_back(sy);
             verts.push_back(tx); verts.push_back(ty);
 
-            // arrowhead: two short lines from tip
+            // arrowhead: two short lines from tip, flared ~30 deg
+            // from the backward direction (so the wings form a V pointing
+            // back toward the shaft, not forward past the tip).
             float headLen = L * 0.35f;
-            // rotate dir by +/- 150 deg from forward
-            // simpler: arrowhead = tip - headLen*(dir rotated +/-25deg)
-            float ca = cosf(2.6f); // ~150 deg
-            float sa = sinf(2.6f);
+            float ca = cosf(0.5f); // ~30 deg
+            float sa = sinf(0.5f);
             float h1x = tx + headLen * ( ca*(-dx) - sa*(-dy));
             float h1y = ty + headLen * ( sa*(-dx) + ca*(-dy));
             float h2x = tx + headLen * ( ca*(-dx) + sa*(-dy));
